@@ -88,12 +88,6 @@ Run the container:
 docker run -p 8080:8080 kubeblueprint:latest
 ```
 
-Or with a custom port:
-
-```bash
-docker run -p 3000:8080 -e PORT=8080 kubeblueprint:latest
-```
-
 Access the application at `http://localhost:8080` (or your specified port).
 
 ### Using Makefile
@@ -138,41 +132,6 @@ make test     # Run tests
 └── templates/
     └── index.html         # Web interface template
 ```
-
-## Configuration
-
-### Environment Variables
-
-- `PORT`: Server port (default: `8080`)
-
-Example:
-```bash
-export PORT=3000
-go run main.go
-```
-
-## API Endpoints
-
-The application provides REST endpoints to generate Kubernetes manifests. Submit a JSON payload with your desired configuration to receive:
-
-- Helm chart files
-- Kustomize overlays with base configurations
-- Complete manifest bundles ready for deployment
-
-## Technologies Used
-
-- **Backend**: Go 1.22
-- **Frontend**: Vanilla JavaScript, HTML5, CSS3
-- **Container**: Docker with Alpine Linux
-- **Kubernetes Tools**: Helm, Kustomize
-
-## Contributing
-
-1. Fork the repository
-2. Create a feature branch (`git checkout -b feature/amazing-feature`)
-3. Commit your changes (`git commit -m 'Add amazing feature'`)
-4. Push to the branch (`git push origin feature/amazing-feature`)
-5. Open a Pull Request
 
 ## License
 
