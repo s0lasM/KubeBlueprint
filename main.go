@@ -22,7 +22,7 @@ func main() {
 
 	addr := fmt.Sprintf(":%s", *port)
 	log.Printf("╔══════════════════════════════════════════╗")
-	log.Printf("║  KubeBlueprint               			   ║")
+	log.Printf("║  KubeBlueprint               			  ║")
 	log.Printf("║  http://localhost%s                      ║", addr)
 	log.Printf("╚══════════════════════════════════════════╝")
 
