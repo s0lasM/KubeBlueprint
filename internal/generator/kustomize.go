@@ -54,15 +54,15 @@ func GenerateKustomize(req models.BlueprintRequest) []models.GeneratedFile {
 	if res["rbac"] {
 		add("base/rbac.yaml", kustomRBAC(name))
 	}
-	// Always generate HPA unless KEDA is enabled
-	if !req.Keda.Enabled {
+	if res["hpa"] && !req.Keda.Enabled {
 		add("base/hpa.yaml", kustomHPA(name))
 	}
 	if res["pvc"] {
 		add("base/pvc.yaml", kustomPVC(name))
 	}
-	// Always generate PDB
-	add("base/pdb.yaml", kustomPDB(name))
+	if res["pdb"] {
+		add("base/pdb.yaml", kustomPDB(name))
+	}
 	if res["vpa"] {
 		add("base/vpa.yaml", kustomVPA(name))
 	}
@@ -115,7 +115,7 @@ func GenerateKustomize(req models.BlueprintRequest) []models.GeneratedFile {
     if res["networkpolicy"] && sec.NetPolicy {
       add("overlays/dev/patches/networkpolicy-patch.yaml", kustomDevNetworkPolicy(name))
     }
-    if !req.Keda.Enabled {
+    if res["hpa"] && !req.Keda.Enabled {
       add("overlays/dev/patches/hpa-patch.yaml", kustomDevHPAPatch(name))
     }
   }
@@ -130,7 +130,7 @@ func GenerateKustomize(req models.BlueprintRequest) []models.GeneratedFile {
     if res["configmap"] {
       add("overlays/staging/patches/configmap-patch.yaml", kustomStagingConfigMap(name))
     }
-    if !req.Keda.Enabled {
+    if res["hpa"] && !req.Keda.Enabled {
       add("overlays/staging/patches/hpa-patch.yaml", kustomStagingHPAPatch(name))
     }
   }
@@ -145,7 +145,7 @@ func GenerateKustomize(req models.BlueprintRequest) []models.GeneratedFile {
     if res["configmap"] {
       add("overlays/test/patches/configmap-patch.yaml", kustomStagingConfigMap(name))
     }
-    if !req.Keda.Enabled {
+    if res["hpa"] && !req.Keda.Enabled {
       add("overlays/test/patches/hpa-patch.yaml", kustomTestHPAPatch(name))
     }
   }
@@ -157,10 +157,12 @@ func GenerateKustomize(req models.BlueprintRequest) []models.GeneratedFile {
     if res["ingress"] {
       add("overlays/prod/patches/ingress.yaml", kustomProdIngress(name))
     }
-    if !req.Keda.Enabled {
+    if res["hpa"] && !req.Keda.Enabled {
       add("overlays/prod/patches/hpa-patch.yaml", kustomProdHPAPatch(name))
     }
-    add("overlays/prod/patches/pdb-patch.yaml", kustomProdPDBPatch(name))
+    if res["pdb"] {
+      add("overlays/prod/patches/pdb-patch.yaml", kustomProdPDBPatch(name))
+    }
     if res["configmap"] {
       add("overlays/prod/patches/configmap-patch.yaml", kustomProdConfigMap(name))
     }
@@ -189,18 +191,12 @@ func buildBaseResourceList(res map[string]bool, req models.BlueprintRequest) []s
 	if res["hpa"] && !req.Keda.Enabled {
 		all = append(all, "hpa.yaml")
 	}
-	// Always include HPA
-	if !req.Keda.Enabled {
-		all = append(all, "hpa.yaml")
-	}
 	if res["pvc"] {
 		all = append(all, "pvc.yaml")
 	}
-	if res["poddisruptionbudget"] {
+	if res["pdb"] {
 		all = append(all, "pdb.yaml")
 	}
-	// Always include PDB
-	all = append(all, "pdb.yaml")
 	if res["vpa"] {
 		all = append(all, "vpa.yaml")
 	}
@@ -288,11 +284,17 @@ spec:
         prometheus.io/scrape: "true"
         prometheus.io/port: "%d"
     spec:
-      serviceAccountName: %s
-      automountServiceAccountToken: false
+`, name, name, name, name, name, port))
+
+    if res["serviceaccount"] {
+        b.WriteString(fmt.Sprintf(`      serviceAccountName: %s
+`, name))
+    }
+
+    b.WriteString(`      automountServiceAccountToken: false
       terminationGracePeriodSeconds: 60
       securityContext:
-`, name, name, name, name, name, port, name))
+`)
 
 	if sec.NonRoot {
 		b.WriteString(`        runAsNonRoot: true
@@ -364,10 +366,25 @@ spec:
             - name: http
               containerPort: %d
               protocol: TCP
-          envFrom:
-            - configMapRef:
+`, port))
+
+    // Build envFrom block based on selected resources
+    if res["configmap"] || res["secret"] {
+        b.WriteString(`          envFrom:
+`)
+        if res["configmap"] {
+            b.WriteString(fmt.Sprintf(`            - configMapRef:
                 name: %s-config
-          livenessProbe:
+`, name))
+        }
+        if res["secret"] {
+            b.WriteString(fmt.Sprintf(`            - secretRef:
+                name: %s-secret
+`, name))
+        }
+    }
+
+	b.WriteString(fmt.Sprintf(`          livenessProbe:
             httpGet:
               path: /healthz
               port: %d
@@ -393,24 +410,22 @@ spec:
             limits:
               cpu: 500m
               memory: 256Mi
-              ephemeral-storage: 512Mi
+
             requests:
               cpu: 100m
               memory: 128Mi
-              ephemeral-storage: 128Mi
-          lifecycle:
-            preStop:
-              exec:
-                command: ["/bin/sh", "-c", "sleep 5"]
-`, port, name, port, port, port))
 
-    // Only include tmp/varrun volume mounts and volumes when PVCs are requested
+`, port, port, port))
+
+    // Only include volume mounts and volumes when PVCs are requested
     if res["pvc"] {
-        b.WriteString(`      volumeMounts:
+        b.WriteString(fmt.Sprintf(`          volumeMounts:
             - name: tmp
               mountPath: /tmp
             - name: varrun
               mountPath: /var/run
+            - name: data
+              mountPath: /data
       volumes:
         - name: tmp
           emptyDir:
@@ -418,23 +433,11 @@ spec:
         - name: varrun
           emptyDir:
             sizeLimit: 10Mi
-`)
+        - name: data
+          persistentVolumeClaim:
+            claimName: %s-data
+`, name))
     }
-
-    // remaining tail sections
-    b.WriteString(`      {{- with .Values.nodeSelector }}
-      nodeSelector:
-        {{- toYaml . | nindent 8 }}
-      {{- end }}
-      {{- with .Values.affinity }}
-      affinity:
-        {{- toYaml . | nindent 8 }}
-      {{- end }}
-      {{- with .Values.tolerations }}
-      tolerations:
-        {{- toYaml . | nindent 8 }}
-      {{- end }}
-`)
 
     return b.String()
 }
@@ -777,11 +780,11 @@ spec:
                 limits:
                   cpu: 200m
                   memory: 128Mi
-                  ephemeral-storage: 256Mi
+    
                 requests:
                   cpu: 50m
                   memory: 64Mi
-                  ephemeral-storage: 64Mi
+    
               volumeMounts:
                 - name: tmp
                   mountPath: /tmp
@@ -1173,51 +1176,30 @@ func kustomOverlayKustomization(name, imgRepo, imgTag, env string, res map[strin
 	ns := fmt.Sprintf("%s-%s", name, env)
 
 	var extraResources string
-	var extraPatches string
+	if res["ingress"] {
+		extraResources = `  - patches/ingress.yaml`
+	}
+
+	// Build patches list dynamically based on selected resources
+	patches := []string{`  - path: patches/deployment-patch.yaml`}
+	if res["configmap"] {
+		patches = append(patches, `  - path: patches/configmap-patch.yaml`)
+	}
+	if res["hpa"] && !keda.Enabled {
+		patches = append(patches, `  - path: patches/hpa-patch.yaml`)
+	}
+
 	switch env {
 	case "dev":
-		if res["ingress"] {
-			extraResources = `  - patches/ingress.yaml`
-		}
-		extraPatches = `  - path: patches/deployment-patch.yaml
-  - path: patches/configmap-patch.yaml`
 		if res["networkpolicy"] && sec.NetPolicy {
-			extraPatches += `
-  - path: patches/networkpolicy-patch.yaml`
-		}
-		if !keda.Enabled {
-			extraPatches += `
-  - path: patches/hpa-patch.yaml`
-		}
-	case "staging":
-		if res["ingress"] {
-			extraResources = `  - patches/ingress.yaml`
-		}
-		extraPatches = `  - path: patches/deployment-patch.yaml
-  - path: patches/configmap-patch.yaml`
-		if !keda.Enabled {
-			extraPatches += `
-  - path: patches/hpa-patch.yaml`
+			patches = append(patches, `  - path: patches/networkpolicy-patch.yaml`)
 		}
 	case "prod":
-		if res["ingress"] {
-			extraResources = `  - patches/ingress.yaml`
-		}
-		extraPatches = `  - path: patches/deployment-patch.yaml
-  - path: patches/hpa-patch.yaml
-  - path: patches/pdb-patch.yaml
-  - path: patches/configmap-patch.yaml`
-	case "test":
-		if res["ingress"] {
-			extraResources = `  - patches/ingress.yaml`
-		}
-		extraPatches = `  - path: patches/deployment-patch.yaml
-  - path: patches/configmap-patch.yaml`
-		if !keda.Enabled {
-			extraPatches += `
-  - path: patches/hpa-patch.yaml`
+		if res["pdb"] {
+			patches = append(patches, `  - path: patches/pdb-patch.yaml`)
 		}
 	}
+	extraPatches := strings.Join(patches, "\n")
 
 	return fmt.Sprintf(`apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
@@ -1257,11 +1239,11 @@ spec:
             limits:
               cpu: 200m
               memory: 128Mi
-              ephemeral-storage: 256Mi
+
             requests:
               cpu: 50m
               memory: 64Mi
-              ephemeral-storage: 64Mi
+
 `, name, name)
 }
 
@@ -1343,11 +1325,11 @@ spec:
             limits:
               cpu: 300m
               memory: 192Mi
-              ephemeral-storage: 256Mi
+
             requests:
               cpu: 75m
               memory: 96Mi
-              ephemeral-storage: 96Mi
+
 `, name, name)
 }
 
@@ -1415,11 +1397,11 @@ spec:
             limits:
               cpu: 500m
               memory: 256Mi
-              ephemeral-storage: 512Mi
+
             requests:
               cpu: 100m
               memory: 128Mi
-              ephemeral-storage: 128Mi
+
 `, name, name)
 }
 

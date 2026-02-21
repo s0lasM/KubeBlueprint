@@ -69,8 +69,10 @@ func GenerateHelm(req models.BlueprintRequest) []models.GeneratedFile {
 	if res["configmap"] {
 		add("templates/configmap.yaml", helmConfigMap(name))
 	}
-	if res["hpa"] && !req.Keda.Enabled {
-		add("templates/hpa.yaml", helmHPA(name))
+	if res["hpa"] {
+		if !req.Keda.Enabled {
+			add("templates/hpa.yaml", helmHPA(name))
+		}
 	}
   // Vertical Pod Autoscaler (VPA) - optional
   if res["vpa"] {
@@ -86,8 +88,9 @@ func GenerateHelm(req models.BlueprintRequest) []models.GeneratedFile {
 	if res["pvc"] {
 		add("templates/pvc.yaml", helmPVC(name))
 	}
-	// Always generate PDB
-	add("templates/pdb.yaml", helmPDB(name))
+	if res["pdb"] {
+		add("templates/pdb.yaml", helmPDB(name))
+	}
 	if res["cronjob"] {
     add("templates/cronjob.yaml", helmCronJob(name, img, sec, res))
 	}
@@ -171,15 +174,20 @@ image:
 
 nameOverride: ""
 fullnameOverride: ""
+`, name, imgRepo, imgTag))
 
-# ── Service Account ──────────────────────────────────────────────
+	if res["serviceaccount"] {
+		b.WriteString(`# ── Service Account ──────────────────────────────────────────────
 serviceAccount:
   create: true
   annotations: {}
   # Never auto-mount — use explicit volumeMount if needed
   automountServiceAccountToken: false
 
-# ── Pod metadata ─────────────────────────────────────────────────
+`)
+	}
+
+	b.WriteString(fmt.Sprintf(`# ── Pod metadata ─────────────────────────────────────────────────
 podAnnotations:
   prometheus.io/scrape: "true"
   prometheus.io/port: %q
@@ -188,7 +196,7 @@ podLabels: {}
 # ── Pod-level Security Context ───────────────────────────────────
 # CIS Kubernetes Benchmark v1.9 + NSA Hardening Guidance
 podSecurityContext:
-`, name, imgRepo, imgTag, fmt.Sprintf("%d", port)))
+`, fmt.Sprintf("%d", port)))
 
 	if sec.NonRoot {
 		b.WriteString(`  runAsNonRoot: true
@@ -265,6 +273,50 @@ service:
   port: %d
   protocol: TCP
 
+# ── Resources ────────────────────────────────────────────────────
+resources:
+  limits:
+    cpu: 500m
+    memory: 256Mi
+  requests:
+    cpu: 100m
+    memory: 128Mi
+
+# ── Probes ───────────────────────────────────────────────────────
+livenessProbe:
+  httpGet:
+    path: /healthz
+    port: http
+  initialDelaySeconds: 15
+  periodSeconds: 20
+  timeoutSeconds: 5
+  failureThreshold: 3
+
+readinessProbe:
+  httpGet:
+    path: /readyz
+    port: http
+  initialDelaySeconds: 5
+  periodSeconds: 10
+  timeoutSeconds: 3
+  failureThreshold: 3
+
+startupProbe:
+  httpGet:
+    path: /healthz
+    port: http
+  failureThreshold: 30
+  periodSeconds: 10
+
+# ── Autoscaling ──────────────────────────────────────────────────
+autoscaling:
+  enabled: false
+  minReplicas: 2
+  maxReplicas: 6
+  targetCPUUtilizationPercentage: 70
+  targetMemoryUtilizationPercentage: 80
+  scaleDownStabilizationWindowSeconds: 300
+
 # ── Volumes (transparent defaults for tmp dirs used by Deployment)
 volumes:
   tmpDir:
@@ -301,16 +353,22 @@ networkPolicy:
 `)
 	}
 
-	b.WriteString(fmt.Sprintf(`# ── PodDisruptionBudget ───────────────────────────────────────────
+	if res["pdb"] {
+		b.WriteString(`# ── PodDisruptionBudget ───────────────────────────────────────────
 podDisruptionBudget:
   enabled: true
   minAvailable: 1
 
-# ── Application config (mounted as ConfigMap) ─────────────────────
+`)
+	}
+
+	if res["configmap"] {
+		b.WriteString(fmt.Sprintf(`# ── Application config (mounted as ConfigMap) ─────────────────────
 config:
   LOG_LEVEL: info
   PORT: %q
 `, fmt.Sprintf("%d", port)))
+	}
 
 	return b.String()
 }
@@ -327,11 +385,11 @@ resources:
   limits:
     cpu: 200m
     memory: 128Mi
-    ephemeral-storage: 256Mi
+
   requests:
     cpu: 50m
     memory: 64Mi
-    ephemeral-storage: 64Mi
+
 
 autoscaling:
   enabled: true
@@ -378,11 +436,11 @@ resources:
   limits:
     cpu: 300m
     memory: 192Mi
-    ephemeral-storage: 256Mi
+
   requests:
     cpu: 75m
     memory: 96Mi
-    ephemeral-storage: 96Mi
+
 
 autoscaling:
   enabled: true
@@ -472,11 +530,11 @@ resources:
   limits:
     cpu: 500m
     memory: 256Mi
-    ephemeral-storage: 512Mi
+
   requests:
     cpu: 100m
     memory: 128Mi
-    ephemeral-storage: 128Mi
+
 
 autoscaling:
   enabled: true
@@ -583,7 +641,9 @@ ServiceAccount name.
 // templates/deployment.yaml
 // ─────────────────────────────────────────────
 func helmDeployment(name string, port int, sec models.Security, res map[string]bool) string {
-    s := fmt.Sprintf(`{{- /*
+    var b strings.Builder
+
+    b.WriteString(fmt.Sprintf(`{{- /*
   Deployment — %s
   Security: CIS K8s Benchmark v1.9 + NSA Hardening + Pod Security Standards (Restricted)
   K8s 1.35+ features: in-place resource resize, sidecar containers, topology-aware routing
@@ -612,9 +672,16 @@ spec:
   template:
     metadata:
       annotations:
-        # Force pod restart when ConfigMap changes
+`, name, name, name, name))
+
+    // Only include configmap checksum if configmap is selected
+    if res["configmap"] {
+        b.WriteString(`        # Force pod restart when ConfigMap changes
         checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
-        {{- with .Values.podAnnotations }}
+`)
+    }
+
+    b.WriteString(fmt.Sprintf(`        {{- with .Values.podAnnotations }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
       labels:
@@ -627,8 +694,15 @@ spec:
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
       {{- end }}
-      serviceAccountName: {{ include "%s.serviceAccountName" . }}
-      automountServiceAccountToken: false
+`, name))
+
+    // Only reference serviceAccount if selected
+    if res["serviceaccount"] {
+        b.WriteString(fmt.Sprintf(`      serviceAccountName: {{ include "%s.serviceAccountName" . }}
+`, name))
+    }
+
+    b.WriteString(`      automountServiceAccountToken: false
       securityContext:
         {{- toYaml .Values.podSecurityContext | nindent 8 }}
       terminationGracePeriodSeconds: 60
@@ -644,12 +718,29 @@ spec:
             {{- toYaml .Values.containerSecurityContext | nindent 12 }}
           ports:
             - name: http
-              containerPort: %d
+`)
+
+    b.WriteString(fmt.Sprintf(`              containerPort: %d
               protocol: TCP
-          envFrom:
-            - configMapRef:
+`, port))
+
+    // Build envFrom block based on selected resources
+    if res["configmap"] || res["secret"] {
+        b.WriteString(`          envFrom:
+`)
+        if res["configmap"] {
+            b.WriteString(fmt.Sprintf(`            - configMapRef:
                 name: {{ include "%s.fullname" . }}-config
-          {{- with .Values.envFrom }}
+`, name))
+        }
+        if res["secret"] {
+            b.WriteString(fmt.Sprintf(`            - secretRef:
+                name: {{ include "%s.fullname" . }}-secret
+`, name))
+        }
+    }
+
+    b.WriteString(`          {{- with .Values.envFrom }}
             {{- toYaml . | nindent 12 }}
           {{- end }}
           {{- with .Values.env }}
@@ -664,7 +755,9 @@ spec:
             {{- toYaml .Values.startupProbe | nindent 12 }}
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
-` , name, name, name, name, name, name, port, name)
+`)
+
+    s := b.String()
 
     // Add volumeMounts + volumes when PVC is selected
     if res["pvc"] {
@@ -682,12 +775,7 @@ spec:
 `
     }
 
-    // append lifecycle and the remaining sections
-    s += `          lifecycle:
-            preStop:
-              exec:
-                command: ["/bin/sh", "-c", "sleep 5"]
-`
+    // append the remaining sections
 
     // Add volumes block when PVC is selected
     if res["pvc"] {
@@ -1115,11 +1203,11 @@ spec:
                 limits:
                   cpu: 200m
                   memory: 128Mi
-                  ephemeral-storage: 256Mi
+              
                 requests:
                   cpu: 50m
                   memory: 64Mi
-                  ephemeral-storage: 64Mi
+              
 `, name, name, name, name, boolStr(sec.NonRoot), roVal, privEsc)
 
     // remove tmp mount/volume when PVC not selected
